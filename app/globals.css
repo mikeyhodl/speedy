@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+:root {
+  --font-geist: "Inter", "SF Pro Display", "Segoe UI", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --background: #f5f6f8;
+  --foreground: #15171c;
+  --card: rgba(255, 255, 255, 0.88);
+  --card-foreground: #15171c;
+  --primary: #4b5fff;
+  --primary-foreground: #ffffff;
+  --muted: #eef0f4;
+  --muted-foreground: #6f7581;
+  --border: #e3e5e9;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --font-sans: var(--font-geist);
+  --font-mono: var(--font-mono);
+}
+
+* { border-color: var(--border); }
+body {
+  margin: 0;
+  color: var(--foreground);
+  background:
+    radial-gradient(circle at 50% -20%, rgba(75, 95, 255, .12), transparent 36rem),
+    var(--background);
+  font-family: var(--font-geist);
+}
+
+button, input { font: inherit; }
+::selection { background: rgba(75, 95, 255, .22); }
