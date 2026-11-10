@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 :root {
   --font-geist: "Inter", "SF Pro Display", "Segoe UI", sans-serif;
@@ -12,6 +13,25 @@
   --muted: #eef0f4;
   --muted-foreground: #6f7581;
   --border: #e3e5e9;
+  --surface: #ffffff;
+  --surface-soft: #f8f9fa;
+  --gauge-track: rgba(15, 23, 42, .06);
+}
+
+.dark {
+  color-scheme: dark;
+  --background: #0b0e14;
+  --foreground: #f4f7fb;
+  --card: rgba(19, 24, 34, .9);
+  --card-foreground: #f4f7fb;
+  --primary: #8190ff;
+  --primary-foreground: #ffffff;
+  --muted: #1b2230;
+  --muted-foreground: #9aa5b5;
+  --border: #293142;
+  --surface: #151a24;
+  --surface-soft: #111620;
+  --gauge-track: rgba(255, 255, 255, .08);
 }
 
 @theme inline {
@@ -36,6 +56,13 @@ body {
     radial-gradient(circle at 50% -20%, rgba(75, 95, 255, .12), transparent 36rem),
     var(--background);
   font-family: var(--font-geist);
+  transition: background-color .2s ease, color .2s ease;
+}
+
+.dark body {
+  background:
+    radial-gradient(circle at 50% -20%, rgba(96, 113, 255, .18), transparent 36rem),
+    var(--background);
 }
 
 button, input { font: inherit; }
