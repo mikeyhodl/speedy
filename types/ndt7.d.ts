@@ -3,7 +3,21 @@ declare module "@m-lab/ndt7" {
     ElapsedTime?: number;
     NumBytes?: number;
     MeanClientMbps?: number;
-    TCPInfo?: { MinRTT?: number; RTT?: number };
+    TCPInfo?: {
+      MinRTT?: number;
+      RTT?: number;
+      RTTVar?: number;
+      BytesSent?: number;
+      BytesRetrans?: number;
+      TotalRetrans?: number;
+      ElapsedTime?: number;
+      BusyTime?: number;
+      RWndLimited?: number;
+      SndBufLimited?: number;
+      SndCwnd?: number;
+      PacingRate?: number;
+      PMTU?: number;
+    };
     BBRInfo?: { MinRTT?: number };
     ConnectionInfo?: { Client?: string; Server?: string; UUID?: string };
   };

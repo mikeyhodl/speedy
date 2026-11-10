@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Activity, ArrowDown, ArrowUp, Clock3, Database, Gauge, Globe2, History, LoaderCircle, MapPin, RotateCcw, Server, ShieldCheck, Trash2 } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, ChevronDown, Clock3, Database, Gauge, Globe2, History, LoaderCircle, MapPin, RotateCcw, Server, ShieldCheck, Trash2 } from "lucide-react";
 import ndt7, { type Measurement, type Server as NdtServer } from "@m-lab/ndt7";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -9,7 +9,24 @@ import { cn } from "@/lib/utils";
 
 type Phase = "idle" | "locating" | "download" | "upload" | "complete" | "error";
 type TestMode = "full" | "download" | "upload";
-type TestResult = { id: string; at: string; download: number; upload: number; ping: number | null; location: string; dataUsed?: number; ip?: string; mode?: TestMode };
+type TcpInfo = NonNullable<Measurement["TCPInfo"]>;
+type Diagnostics = {
+  jitter: number | null;
+  retransmissionRate: number | null;
+  grade: "A" | "B" | "C" | "D" | "F";
+  score: number;
+  diagnosis: string;
+  rtt: number | null;
+  minRtt: number | null;
+  congestionWindow: number | null;
+  pacingRate: number | null;
+  pmtu: number | null;
+  totalRetrans: number | null;
+  receiverLimited: number | null;
+  senderLimited: number | null;
+};
+type TestResult = { id: string; at: string; download: number; upload: number; ping: number | null; location: string; dataUsed?: number; ip?: string; mode?: TestMode; diagnostics?: Diagnostics };
+type LiveState = { download: number; upload: number; ping: number | null; location: string; downloadBytes: number; uploadBytes: number; ip: string; tcp: Partial<Record<"download" | "upload", TcpInfo>> };
 
 const COOKIE_NAME = "speedy_history";
 const MAX_HISTORY = 8;
@@ -23,6 +40,13 @@ function readHistory(): TestResult[] {
 
 function writeHistory(items: TestResult[]) {
   document.cookie = `${COOKIE_NAME}=${encodeURIComponent(JSON.stringify(items.slice(0, MAX_HISTORY)))}; Max-Age=2592000; Path=/; SameSite=Lax`;
+}
+
+function createId() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function speedFrom(data: Measurement) {
@@ -48,6 +72,48 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1_000_000).toFixed(bytes >= 100_000_000 ? 0 : 1)} MB`;
 }
 
+function summarizeDiagnostics(live: LiveState, mode: TestMode): Diagnostics {
+  const infos = [live.tcp.download, live.tcp.upload].filter((value): value is TcpInfo => Boolean(value));
+  const averageMicros = (field: "RTT" | "MinRTT" | "RTTVar") => {
+    const values = infos.map((info) => info[field]).filter((value): value is number => typeof value === "number");
+    return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length / 1000 : null;
+  };
+  const sum = (field: "BytesSent" | "BytesRetrans" | "TotalRetrans" | "ElapsedTime" | "RWndLimited" | "SndBufLimited") =>
+    infos.reduce((total, info) => total + (info[field] ?? 0), 0);
+  const bytesSent = sum("BytesSent");
+  const bytesRetrans = sum("BytesRetrans");
+  const elapsed = sum("ElapsedTime");
+  const receiverRatio = elapsed ? sum("RWndLimited") / elapsed : 0;
+  const senderRatio = elapsed ? sum("SndBufLimited") / elapsed : 0;
+  const jitter = averageMicros("RTTVar");
+  const retransmissionRate = bytesSent ? (bytesRetrans / bytesSent) * 100 : null;
+  const testedSpeed = mode === "download" ? live.download : mode === "upload" ? live.upload : Math.min(live.download, live.upload);
+  let score = 100;
+  if (testedSpeed < 10) score -= 30; else if (testedSpeed < 25) score -= 18; else if (testedSpeed < 50) score -= 8;
+  if ((live.ping ?? 0) > 100) score -= 22; else if ((live.ping ?? 0) > 50) score -= 10;
+  if ((jitter ?? 0) > 30) score -= 20; else if ((jitter ?? 0) > 15) score -= 10;
+  if ((retransmissionRate ?? 0) > 3) score -= 25; else if ((retransmissionRate ?? 0) > 1) score -= 12;
+  score = Math.max(0, Math.round(score));
+  const grade: Diagnostics["grade"] = score >= 85 ? "A" : score >= 70 ? "B" : score >= 55 ? "C" : score >= 40 ? "D" : "F";
+  const diagnosis = receiverRatio > 0.15 ? "Receiver limited" : senderRatio > 0.15 ? "Sender limited" : "Network path limited";
+  const latest = infos.at(-1);
+  return {
+    jitter,
+    retransmissionRate,
+    grade,
+    score,
+    diagnosis,
+    rtt: averageMicros("RTT"),
+    minRtt: averageMicros("MinRTT"),
+    congestionWindow: latest?.SndCwnd ?? null,
+    pacingRate: latest?.PacingRate ?? null,
+    pmtu: latest?.PMTU ?? null,
+    totalRetrans: infos.length ? sum("TotalRetrans") : null,
+    receiverLimited: elapsed ? receiverRatio * 100 : null,
+    senderLimited: elapsed ? senderRatio * 100 : null,
+  };
+}
+
 const phaseCopy: Record<Phase, string> = {
   idle: "Ready when you are",
   locating: "Finding the best nearby server",
@@ -64,7 +130,7 @@ function Meter({ value, phase, onStart, busy }: { value: number; phase: Phase; o
   const progress = Math.log1p(capped) / Math.log1p(500);
   const status = phase === "upload" ? "Testing upload" : phase === "download" ? "Testing download" : phase === "locating" ? "Finding server" : phase === "complete" ? "Test complete" : phase === "error" ? "Ready to retry" : "Ready to test";
   return (
-    <div className="relative mx-auto my-7 aspect-[1.55/1] w-full max-w-[650px] overflow-hidden rounded-[1.75rem] border border-slate-200 bg-[#f8f9fa] shadow-[0_20px_50px_-36px_rgba(15,23,42,.28)]">
+    <div className="relative mx-auto my-5 h-[320px] w-full max-w-[650px] overflow-hidden rounded-[1.5rem] border border-slate-200 bg-[#f8f9fa] shadow-[0_20px_50px_-36px_rgba(15,23,42,.28)] sm:my-7 sm:aspect-[1.55/1] sm:h-auto sm:rounded-[1.75rem]">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_46%,rgba(163,244,73,.08),transparent_48%)]" />
       <div className="absolute inset-x-6 top-5 z-10 flex items-center justify-between border-b border-slate-200 pb-4 text-[10px] font-semibold uppercase tracking-[.18em] text-slate-500">
         <span>Live throughput</span><span className="flex items-center gap-2"><span className={cn("size-1.5 rounded-full", busy ? "animate-pulse bg-[#65b922]" : phase === "complete" ? "bg-emerald-500" : "bg-slate-300")} />{busy ? "Measuring" : "Optimal"}</span>
@@ -99,7 +165,7 @@ export function SpeedTest() {
   const [error, setError] = useState("");
   const [lastResult, setLastResult] = useState<TestResult | null>(null);
   const [testMode, setTestMode] = useState<TestMode>("full");
-  const live = useRef({ download: 0, upload: 0, ping: null as number | null, location: "Nearest M-Lab server", downloadBytes: 0, uploadBytes: 0, ip: "Unavailable" });
+  const live = useRef<LiveState>({ download: 0, upload: 0, ping: null, location: "Nearest M-Lab server", downloadBytes: 0, uploadBytes: 0, ip: "Unavailable", tcp: {} });
 
   useEffect(() => {
     const id = window.setTimeout(() => setHistory(readHistory()), 0);
@@ -121,6 +187,7 @@ export function SpeedTest() {
       (kind === "download" ? setDownload : setUpload)(speed);
     } else {
       if (data.ConnectionInfo?.Client) live.current.ip = clientIpFrom(data.ConnectionInfo.Client);
+      if (data.TCPInfo) live.current.tcp[kind] = data.TCPInfo;
       const nextPing = latencyFrom(data);
       if (nextPing !== null && nextPing > 0) {
         live.current.ping = live.current.ping === null ? nextPing : Math.min(live.current.ping, nextPing);
@@ -131,7 +198,7 @@ export function SpeedTest() {
 
   const runTest = async () => {
     if (phase === "download" || phase === "upload" || phase === "locating") return;
-    live.current = { download: 0, upload: 0, ping: null, location: "Nearest M-Lab server", downloadBytes: 0, uploadBytes: 0, ip: "Unavailable" };
+    live.current = { download: 0, upload: 0, ping: null, location: "Nearest M-Lab server", downloadBytes: 0, uploadBytes: 0, ip: "Unavailable", tcp: {} };
     setDownload(0); setUpload(0); setPing(null); setError(""); setMachine(""); setLastResult(null); setPhase("locating");
     try {
       const config = {
@@ -159,7 +226,7 @@ export function SpeedTest() {
       }
       if (code !== 0) throw new Error("The measurement server could not complete the test.");
       const result: TestResult = {
-        id: crypto.randomUUID(),
+        id: createId(),
         at: new Date().toISOString(),
         download: live.current.download,
         upload: live.current.upload,
@@ -168,6 +235,7 @@ export function SpeedTest() {
         dataUsed: live.current.downloadBytes + live.current.uploadBytes,
         ip: live.current.ip,
         mode: testMode,
+        diagnostics: summarizeDiagnostics(live.current, testMode),
       };
       const next = [result, ...readHistory()].slice(0, MAX_HISTORY);
       setLastResult(result); setHistory(next); writeHistory(next); setPhase("complete");
@@ -183,24 +251,24 @@ export function SpeedTest() {
 
   return (
     <main className="min-h-screen">
-      <nav className="mx-auto flex max-w-7xl items-center justify-between px-5 py-6 sm:px-8">
+      <nav className="mx-auto flex max-w-7xl items-center justify-between px-4 py-5 sm:px-8 sm:py-6">
         <div className="flex items-center gap-3"><span className="grid size-10 place-items-center rounded-2xl bg-foreground text-white"><Gauge className="size-5" /></span><span className="text-xl font-semibold tracking-tight">speedy.</span></div>
         <a href="#history" className="flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium text-muted-foreground transition hover:bg-white hover:text-foreground"><History className="size-4" /> History</a>
       </nav>
 
-      <section className="mx-auto grid max-w-7xl items-start gap-6 px-5 pb-16 pt-6 sm:px-8 lg:grid-cols-[1fr_340px] lg:pt-12">
-        <Card className="relative overflow-hidden p-5 sm:p-9 lg:p-12">
+      <section className="mx-auto grid max-w-7xl items-start gap-5 px-3 pb-16 pt-4 sm:gap-6 sm:px-8 sm:pt-6 lg:grid-cols-[1fr_340px] lg:pt-12">
+        <Card className="relative overflow-hidden p-4 sm:p-9 lg:p-12">
           <div className="pointer-events-none absolute -right-40 -top-40 size-96 rounded-full bg-primary/10 blur-3xl" />
           <div className="relative">
             <div className="mb-4 flex items-center justify-between gap-4">
-              <div><p className="mb-2 text-xs font-semibold uppercase tracking-[.22em] text-primary">Internet performance</p><h1 className="max-w-xl text-3xl font-semibold tracking-[-.04em] sm:text-5xl">How fast is your connection?</h1></div>
+              <div><p className="mb-2 text-[10px] font-semibold uppercase tracking-[.2em] text-primary sm:text-xs sm:tracking-[.22em]">Internet performance</p><h1 className="max-w-xl text-[2.35rem] font-semibold leading-[1.02] tracking-[-.04em] sm:text-5xl">How fast is your connection?</h1></div>
               <span className={cn("hidden items-center gap-2 rounded-full border px-3 py-2 text-xs font-medium sm:flex", busy ? "border-primary/20 bg-primary/5 text-primary" : "bg-white text-muted-foreground")}><span className={cn("size-2 rounded-full", busy ? "animate-pulse bg-primary" : phase === "complete" ? "bg-emerald-500" : "bg-slate-300")} />{phaseCopy[phase]}</span>
             </div>
 
-            <div className="mx-auto mb-2 flex w-fit rounded-full border border-slate-200 bg-white p-1 shadow-sm" role="group" aria-label="Speed test type">
+            <div className="mx-auto mb-2 grid w-full max-w-md grid-cols-3 rounded-full border border-slate-200 bg-white p-1 shadow-sm" role="group" aria-label="Speed test type">
               {(["full", "download", "upload"] as const).map((mode) => (
-                <button key={mode} type="button" onClick={() => setTestMode(mode)} disabled={busy} aria-pressed={testMode === mode} className={cn("rounded-full px-4 py-2 text-xs font-semibold capitalize transition sm:px-5", testMode === mode ? "bg-slate-900 text-white shadow-sm" : "text-muted-foreground hover:bg-slate-100 hover:text-foreground", busy && "cursor-not-allowed opacity-60")}>
-                  {mode === "full" ? "Full test" : `${mode} only`}
+                <button key={mode} type="button" onClick={() => setTestMode(mode)} disabled={busy} aria-pressed={testMode === mode} className={cn("min-w-0 rounded-full px-2 py-2 text-[11px] font-semibold capitalize transition sm:px-5 sm:text-xs", testMode === mode ? "bg-slate-900 text-white shadow-sm" : "text-muted-foreground hover:bg-slate-100 hover:text-foreground", busy && "cursor-not-allowed opacity-60")}>
+                  <span className="sm:hidden">{mode === "full" ? "Full" : mode}</span><span className="hidden sm:inline">{mode === "full" ? "Full test" : `${mode} only`}</span>
                 </button>
               ))}
             </div>
@@ -214,9 +282,34 @@ export function SpeedTest() {
             </div>
 
             {phase === "complete" && lastResult && (
-              <div className="mx-auto mt-4 grid w-full max-w-2xl gap-3 sm:grid-cols-2">
-                <div className="flex items-center justify-center gap-3 rounded-2xl border bg-white/80 px-4 py-3 text-center shadow-sm backdrop-blur"><span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary"><Database className="size-4" /></span><div><p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Data used</p><p className="mt-0.5 font-mono text-sm font-semibold">{typeof lastResult.dataUsed === "number" ? formatBytes(lastResult.dataUsed) : "-"}</p></div></div>
-                <div className="flex items-center justify-center gap-3 rounded-2xl border bg-white/80 px-4 py-3 text-center shadow-sm backdrop-blur"><span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary"><Globe2 className="size-4" /></span><div className="min-w-0"><p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Public IP address</p><p className="mt-0.5 truncate font-mono text-sm font-semibold">{lastResult.ip}</p></div></div>
+              <div className="mx-auto mt-4 w-full max-w-2xl space-y-3">
+                {lastResult.diagnostics && (
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <DiagnosticTile label="Quality" value={`${lastResult.diagnostics.grade} · ${lastResult.diagnostics.score}`} note="Connection score" tone="primary" />
+                    <DiagnosticTile label="Jitter" value={lastResult.diagnostics.jitter === null ? "-" : `${lastResult.diagnostics.jitter.toFixed(1)} ms`} note="RTT variation" />
+                    <DiagnosticTile label="Retransmission" value={lastResult.diagnostics.retransmissionRate === null ? "-" : `${lastResult.diagnostics.retransmissionRate.toFixed(2)}%`} note="Not packet loss" />
+                    <DiagnosticTile label="Diagnosis" value={lastResult.diagnostics.diagnosis} note="Likely bottleneck" />
+                  </div>
+                )}
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="flex items-center justify-center gap-3 rounded-2xl border bg-white/80 px-4 py-3 text-center shadow-sm backdrop-blur"><span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary"><Database className="size-4" /></span><div><p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Data used</p><p className="mt-0.5 font-mono text-sm font-semibold">{typeof lastResult.dataUsed === "number" ? formatBytes(lastResult.dataUsed) : "-"}</p></div></div>
+                  <div className="flex items-center justify-center gap-3 rounded-2xl border bg-white/80 px-4 py-3 text-center shadow-sm backdrop-blur"><span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary"><Globe2 className="size-4" /></span><div className="min-w-0"><p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Public IP address</p><p className="mt-0.5 truncate font-mono text-sm font-semibold">{lastResult.ip}</p></div></div>
+                </div>
+                {lastResult.diagnostics && (
+                  <details className="group overflow-hidden rounded-2xl border border-slate-200 bg-white/80 shadow-sm">
+                    <summary className="flex cursor-pointer list-none items-center justify-between px-5 py-4 text-sm font-semibold marker:hidden">Detailed TCP diagnostics <ChevronDown className="size-4 text-muted-foreground transition-transform group-open:rotate-180" /></summary>
+                    <div className="grid grid-cols-2 gap-x-5 gap-y-4 border-t border-slate-100 px-5 py-4 sm:grid-cols-4">
+                      <DetailValue label="Smoothed RTT" value={lastResult.diagnostics.rtt === null ? "-" : `${lastResult.diagnostics.rtt.toFixed(1)} ms`} />
+                      <DetailValue label="Minimum RTT" value={lastResult.diagnostics.minRtt === null ? "-" : `${lastResult.diagnostics.minRtt.toFixed(1)} ms`} />
+                      <DetailValue label="Congestion window" value={lastResult.diagnostics.congestionWindow === null ? "-" : `${lastResult.diagnostics.congestionWindow} segments`} />
+                      <DetailValue label="Pacing rate" value={lastResult.diagnostics.pacingRate === null ? "-" : `${(lastResult.diagnostics.pacingRate * 8 / 1_000_000).toFixed(1)} Mbps`} />
+                      <DetailValue label="Path MTU" value={lastResult.diagnostics.pmtu === null ? "-" : `${lastResult.diagnostics.pmtu} bytes`} />
+                      <DetailValue label="Retransmits" value={lastResult.diagnostics.totalRetrans === null ? "-" : lastResult.diagnostics.totalRetrans.toLocaleString()} />
+                      <DetailValue label="Receiver limited" value={lastResult.diagnostics.receiverLimited === null ? "-" : `${lastResult.diagnostics.receiverLimited.toFixed(1)}%`} />
+                      <DetailValue label="Sender limited" value={lastResult.diagnostics.senderLimited === null ? "-" : `${lastResult.diagnostics.senderLimited.toFixed(1)}%`} />
+                    </div>
+                  </details>
+                )}
               </div>
             )}
 
@@ -243,9 +336,9 @@ export function SpeedTest() {
         </aside>
       </section>
 
-      <section id="history" className="mx-auto max-w-7xl px-5 pb-24 sm:px-8">
+      <section id="history" className="mx-auto max-w-7xl px-3 pb-24 sm:px-8">
         <div className="mb-5 flex items-end justify-between"><div><p className="mb-2 text-xs font-semibold uppercase tracking-[.2em] text-primary">This browser</p><h2 className="text-2xl font-semibold tracking-tight">Recent tests</h2></div>{history.length > 0 && <Button variant="ghost" size="sm" onClick={clearHistory}><Trash2 className="size-4" /> Clear</Button>}</div>
-        {history.length === 0 ? <Card className="grid min-h-40 place-items-center border-dashed bg-transparent text-center text-sm text-muted-foreground"><div><History className="mx-auto mb-3 size-5" /><p>Your completed tests will appear here.</p></div></Card> : <div className="grid gap-3">{history.map((item) => <Card key={item.id} className="grid gap-5 px-5 py-4 lg:grid-cols-[1.15fr_3fr] lg:items-center"><div><div className="flex flex-wrap items-center gap-2"><p className="font-medium">{item.location}</p>{item.mode && item.mode !== "full" && <span className="rounded-full bg-primary/10 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-primary">{item.mode} only</span>}</div><p className="mt-1 text-xs text-muted-foreground">{new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.at))}</p></div><div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-5"><HistoryValue label="Down" value={item.mode === "upload" ? "-" : `${item.download.toFixed(1)} Mbps`} /><HistoryValue label="Up" value={item.mode === "download" ? "-" : `${item.upload.toFixed(1)} Mbps`} /><HistoryValue label="Ping" value={item.ping ? `${item.ping.toFixed(0)} ms` : "-"} /><HistoryValue label="Data used" value={typeof item.dataUsed === "number" ? formatBytes(item.dataUsed) : "Not recorded"} /><HistoryValue label="Public IP" value={item.ip || "Not recorded"} className="col-span-2 sm:col-span-1" /></div></Card>)}</div>}
+        {history.length === 0 ? <Card className="grid min-h-40 place-items-center border-dashed bg-transparent text-center text-sm text-muted-foreground"><div><History className="mx-auto mb-3 size-5" /><p>Your completed tests will appear here.</p></div></Card> : <div className="grid gap-3">{history.map((item) => <Card key={item.id} className="grid gap-5 px-5 py-4 lg:grid-cols-[1.15fr_3fr] lg:items-center"><div><div className="flex flex-wrap items-center gap-2"><p className="font-medium">{item.location}</p>{item.diagnostics && <span className="rounded-full bg-emerald-50 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-emerald-700">Grade {item.diagnostics.grade}</span>}{item.mode && item.mode !== "full" && <span className="rounded-full bg-primary/10 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-primary">{item.mode} only</span>}</div><p className="mt-1 text-xs text-muted-foreground">{new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.at))}</p></div><div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-5"><HistoryValue label="Down" value={item.mode === "upload" ? "-" : `${item.download.toFixed(1)} Mbps`} /><HistoryValue label="Up" value={item.mode === "download" ? "-" : `${item.upload.toFixed(1)} Mbps`} /><HistoryValue label="Ping" value={item.ping ? `${item.ping.toFixed(0)} ms` : "-"} /><HistoryValue label="Data used" value={typeof item.dataUsed === "number" ? formatBytes(item.dataUsed) : "Not recorded"} /><HistoryValue label="Public IP" value={item.ip || "Not recorded"} className="col-span-2 sm:col-span-1" /></div></Card>)}</div>}
       </section>
       <footer className="border-t bg-white/50 py-7 text-center text-xs text-muted-foreground">Powered by Measurement Lab&apos;s open NDT7 infrastructure.</footer>
     </main>
@@ -258,4 +351,12 @@ function Stat({ icon: Icon, label, value, unit, active }: { icon: typeof ArrowDo
 
 function HistoryValue({ label, value, className }: { label: string; value: string; className?: string }) {
   return <div className={cn("min-w-0 text-left", className)}><p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</p><p className="mt-1 truncate font-mono text-sm font-medium" title={value}>{value}</p></div>;
+}
+
+function DiagnosticTile({ label, value, note, tone }: { label: string; value: string; note: string; tone?: "primary" }) {
+  return <div className={cn("rounded-2xl border bg-white/80 px-4 py-3 shadow-sm", tone === "primary" && "border-primary/20 bg-primary/[.04]")}><p className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p><p className={cn("mt-1 text-sm font-bold", tone === "primary" && "text-primary")}>{value}</p><p className="mt-1 text-[10px] text-muted-foreground">{note}</p></div>;
+}
+
+function DetailValue({ label, value }: { label: string; value: string }) {
+  return <div className="min-w-0"><p className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p><p className="mt-1 truncate font-mono text-xs font-semibold" title={value}>{value}</p></div>;
 }
